@@ -28,11 +28,11 @@ var (
 	meter  = otel.Meter("checkout_metername")
 )
 
-// The app sends everything to one place: the OTel Collector. The Collector
-// then passes each signal on to a tool that can store it:
-// traces -> Jaeger, metrics -> Prometheus, logs -> Loki.
-// The app never talks to those tools directly. Jaeger only stores traces,
-// which is why we need the Collector for logs and metrics.
+// The app sends everything to one place: the OTel Collector (see
+// docker-compose.yml and deploy/otel-collector.yaml). Its Datadog exporter
+// converts each signal and forwards it to Datadog:
+// traces -> APM, metrics -> Metrics, logs -> Logs.
+// The app only speaks OTLP, so it has no Datadog code or library in it.
 const collectorEndpoint = "localhost:4317"
 
 // ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ const collectorEndpoint = "localhost:4317"
 // Every signal (traces, metrics, logs) is set up in the same 3 steps:
 //
 //  1. Exporter: HOW and WHERE to send data. Here: OTLP over gRPC to the
-//     Collector. It only sends what it is handed; it creates nothing.
+//     OTel Collector. It only sends what it is handed; it creates nothing.
 //  2. Provider: the engine. It creates spans / counters / log records,
 //     keeps them in memory, and decides WHEN to hand them to the exporter.
 //  3. otel.Set...Provider: makes the provider global, so `tracer`, `meter`
@@ -69,10 +69,12 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	}()
 
 	// Resource = "who is sending this data". These labels are attached to
-	// every span, metric and log. Because all three share them, Grafana can
-	// match a trace, its logs and its metrics to the same service.
+	// every span, metric and log. Datadog turns the first three into its
+	// standard tags (service, version, env), which is how it matches a
+	// trace, its logs and its metrics to the same service.
 	res, err := resource.New(ctx, resource.WithAttributes(
 		attribute.String("service.name", "checkout_servicename"),
+		attribute.String("service.version", "0.1.0"),
 		attribute.String("deployment.environment", "dev"),
 		attribute.String("laptop", "fidelis-bfree"),
 	))

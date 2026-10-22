@@ -2,16 +2,18 @@
 //
 // Setup (Go 1.26+):
 //
-//	docker compose up -d   # Collector, Jaeger, Prometheus, Loki, Grafana, Postgres
+//	cp .env.example .env   # then put your DD_API_KEY (and DD_SITE) in it
+//	docker compose up -d   # OTel Collector (Datadog exporter) + Postgres
 //	go run .
 //	curl -X POST localhost:8081/orders -d '{"user_id":"u_42","amount":59.9}'
 //	curl -X POST localhost:8081/orders -d '{"user_id":"u_42","amount":-1}'  # DB error
 //
-// Then open:
+// The app only speaks OTLP to localhost:4317, where the OTel Collector
+// listens. Then look in Datadog (app.datadoghq.com, or your DD_SITE):
 //
-//	http://localhost:16686  Jaeger      traces for service "checkout_servicename"
-//	http://localhost:9090   Prometheus  e.g. orders_created_total
-//	http://localhost:3000   Grafana     Explore: Loki logs <-> Jaeger traces <-> metrics
+//	APM > Traces                service:checkout_servicename
+//	Logs                        service:checkout_servicename
+//	Metrics > Explorer          orders.created, orders.amount, email.send.duration
 package main
 
 import (

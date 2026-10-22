@@ -11,11 +11,11 @@ import (
 
 // newLogger sends every slog record to two places:
 //   - stdout as JSON, for humans tailing the process
-//   - the OTel log pipeline (otelslog bridge -> Collector -> Loki)
+//   - the OTel log pipeline (otelslog bridge -> OTel Collector -> Datadog Logs)
 //
 // Use the *Context methods (slog.InfoContext(ctx, ...)). The bridge reads the
 // active span from ctx and stamps the record with its trace and span IDs, so
-// Grafana can jump from a log line to its trace in Jaeger and back.
+// Datadog can show a trace's logs next to it in APM, and the trace from a log.
 func newLogger() *slog.Logger {
 	return slog.New(slog.NewMultiHandler(
 		traceIDHandler{slog.NewJSONHandler(os.Stdout, nil)},

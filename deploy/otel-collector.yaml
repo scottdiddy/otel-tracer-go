@@ -1,51 +1,79 @@
-# The app sends all three signals here over OTLP. The Collector routes each
-# one to the backend that can store it. Jaeger only understands traces.
+# OTel Collector -> Datadog. Based on Datadog's own setup snippet.
+#
+#   app --OTLP--> receivers --> processors --> exporters --> Datadog
+#                (otlp, hostmetrics)  (batch)   (datadog/exporter)
+#
+# The API key and site come from .env (git-ignored) via docker-compose.
+# Never write the key in this file: it is committed to git.
+
 receivers:
+  # Where the app sends traces, metrics and logs.
+  # 0.0.0.0, not localhost: inside a container, localhost is the container
+  # itself, so the app on your Mac could not reach it.
   otlp:
     protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+  # The Collector also collects CPU, memory, disk, network... by itself.
+  # Running in Docker Desktop, these describe the Docker Linux VM, not your Mac.
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      paging:
+        metrics:
+          system.paging.utilization:
+            enabled: true
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      disk:
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+      load:
+      memory:
+      network:
+      processes:
 
 processors:
-  batch: {}
+  # Groups data before sending: up to 10 items, or every 10s at the latest.
+  batch:
+    send_batch_max_size: 100
+    send_batch_size: 10
+    timeout: 10s
+
+connectors:
+  # A connector is an exporter for one pipeline AND a receiver for another.
+  # This one reads every span in the traces pipeline and computes APM stats
+  # from them (request count, errors, latency per endpoint), then feeds those
+  # into the metrics pipeline. Without it, Datadog APM shows traces but empty
+  # request/error/latency graphs.
+  datadog/connector:
 
 exporters:
-  # Traces -> Jaeger (it accepts OTLP natively).
-  otlp/jaeger:
-    endpoint: jaeger:4317
-    tls:
-      insecure: true
-
-  # Metrics -> Prometheus, pushed to its OTLP endpoint.
-  otlphttp/prometheus:
-    endpoint: http://prometheus:9090/api/v1/otlp
-    tls:
-      insecure: true
-
-  # Logs -> Loki, pushed to its OTLP endpoint.
-  otlphttp/loki:
-    endpoint: http://loki:3100/otlp
-    tls:
-      insecure: true
-
-  # Prints a one-line summary of everything received: handy to confirm the
-  # app is actually sending. Bump to `detailed` to see full payloads.
-  debug:
-    verbosity: basic
+  datadog/exporter:
+    api:
+      site: ${env:DD_SITE}
+      key: ${env:DD_API_KEY}
+    # Fixed name for the "host" in Datadog; otherwise it is a random container ID.
+    hostname: otel-tracer-go-local
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/jaeger, debug]
+      exporters: [datadog/connector, datadog/exporter] # to APM, and into the connector
     metrics:
-      receivers: [otlp]
+      receivers: [datadog/connector, otlp, hostmetrics] # APM stats + app metrics + host metrics
       processors: [batch]
-      exporters: [otlphttp/prometheus, debug]
+      exporters: [datadog/exporter]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlphttp/loki, debug]
+      exporters: [datadog/exporter]

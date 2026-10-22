@@ -36,8 +36,7 @@ func (s *OrderService) PlaceOrder(ctx context.Context, userID string, amount flo
 		return Order{}, s.fail(ctx, "queue_publish", err)
 	}
 
-	// Metric recorded with ctx: if the span is sampled, the SDK attaches it
-	// as an exemplar, so a spike on a Grafana graph links to a real trace.
+	// Recorded with ctx, so these carry the request's trace context.
 	ordersCreated.Add(ctx, 1)
 	orderAmount.Record(ctx, amount)
 	slog.InfoContext(ctx, "order placed", "order_id", order.ID)

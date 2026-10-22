@@ -20,7 +20,7 @@ var (
 func initMetrics(q *Queue) error {
 	var err error
 
-	// Counter: only goes up. Prometheus shows it as orders_created_total.
+	// Counter: only goes up. Datadog shows it as orders.created.
 	if ordersCreated, err = meter.Int64Counter("orders.created",
 		metric.WithDescription("Orders successfully placed"),
 		metric.WithUnit("{order}")); err != nil {
