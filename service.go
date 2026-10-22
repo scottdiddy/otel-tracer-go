@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"log/slog"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type OrderService struct {
@@ -20,20 +24,32 @@ func (s *OrderService) PlaceOrder(ctx context.Context, userID string, amount flo
 		attribute.String("user.id", userID),
 		attribute.Float64("order.amount", amount),
 	)
-	logger(ctx).Info("placing order", "user_id", userID)
+	// Passing ctx is what links this log line to the span above.
+	slog.InfoContext(ctx, "placing order", "user_id", userID, "amount", amount)
 
 	order, err := s.repo.Insert(ctx, userID, amount)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Order{}, err
+		return Order{}, s.fail(ctx, "db_insert", err)
 	}
 
 	if err := s.queue.Publish(ctx, "order.created", order); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return Order{}, err
+		return Order{}, s.fail(ctx, "queue_publish", err)
 	}
 
+	// Metric recorded with ctx: if the span is sampled, the SDK attaches it
+	// as an exemplar, so a spike on a Grafana graph links to a real trace.
+	ordersCreated.Add(ctx, 1)
+	orderAmount.Record(ctx, amount)
+	slog.InfoContext(ctx, "order placed", "order_id", order.ID)
 	return order, nil
+}
+
+// fail reports one error on all three signals.
+func (s *OrderService) fail(ctx context.Context, errType string, err error) error {
+	span := trace.SpanFromContext(ctx)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	ordersFailed.Add(ctx, 1, metric.WithAttributes(attribute.String("error.type", errType)))
+	slog.ErrorContext(ctx, "order failed", "error.type", errType, "error", err)
+	return err
 }

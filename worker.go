@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -39,13 +42,25 @@ func (w *Worker) handle(msg Message) {
 		attribute.String("messaging.operation", "process"),
 	)
 
+	outcome := "success"
+	defer func() {
+		messagesProcessed.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("messaging.destination.name", msg.Topic),
+			attribute.String("outcome", outcome),
+		))
+	}()
+
 	var order Order
 	if err := json.Unmarshal(msg.Body, &order); err != nil {
+		outcome = "error"
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
+		slog.ErrorContext(ctx, "bad order event", "error", err)
 		return
 	}
 
-	logger(ctx).Info("processing order event", "order_id", order.ID)
+	// Same trace_id as the HTTP request's logs, even though this runs later
+	// in another goroutine: ctx was rebuilt from the message headers.
+	slog.InfoContext(ctx, "processing order event", "order_id", order.ID)
 	sendConfirmationEmail(ctx, order)
 }
