@@ -18,21 +18,34 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// Package-level tracer and meter. Safe to create before the providers are
-// set; they start working as soon as initTelemetry registers the globals.
+// tracer and meter are what the rest of the code uses (tracer.Start,
+// meter.Int64Counter). They come from the OTel API, which on its own does
+// nothing: every call is a no-op. So it is fine to create them here, before
+// any setup. Once initTelemetry registers the real providers with otel.Set...,
+// they start recording for real.
 var (
 	tracer = otel.Tracer("checkout_tracername")
 	meter  = otel.Meter("checkout_metername")
 )
 
-// All three signals go to the OTel Collector, which fans them out:
+// The app sends everything to one place: the OTel Collector. The Collector
+// then passes each signal on to a tool that can store it:
 // traces -> Jaeger, metrics -> Prometheus, logs -> Loki.
-// Jaeger only stores traces, so the Collector is what makes logs and
-// metrics possible without changing the app.
+// The app never talks to those tools directly. Jaeger only stores traces,
+// which is why we need the Collector for logs and metrics.
 const collectorEndpoint = "localhost:4317"
 
 // ---------------------------------------------------------------------------
-// 0. Setup: resource -> (exporter -> provider) x 3 -> propagator
+// 0. Setup
+//
+// Every signal (traces, metrics, logs) is set up in the same 3 steps:
+//
+//  1. Exporter: HOW and WHERE to send data. Here: OTLP over gRPC to the
+//     Collector. It only sends what it is handed; it creates nothing.
+//  2. Provider: the engine. It creates spans / counters / log records,
+//     keeps them in memory, and decides WHEN to hand them to the exporter.
+//  3. otel.Set...Provider: makes the provider global, so `tracer`, `meter`
+//     and slog (and libraries like otelhttp, otelpgx) start using it.
 // ---------------------------------------------------------------------------
 
 func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, err error) {
@@ -44,6 +57,10 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 		}
 		return errs
 	}
+	// shutdown sends whatever is still waiting in memory, then closes the
+	// connections. main calls it on exit; without it the last few spans,
+	// metrics and logs would be lost.
+	//
 	// If a later step fails, flush whatever was already started.
 	defer func() {
 		if err != nil {
@@ -51,8 +68,9 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 		}
 	}()
 
-	// Resource = "who is sending this telemetry". Shared by all three
-	// signals, which is what lets backends line them up per service.
+	// Resource = "who is sending this data". These labels are attached to
+	// every span, metric and log. Because all three share them, Grafana can
+	// match a trace, its logs and its metrics to the same service.
 	res, err := resource.New(ctx, resource.WithAttributes(
 		attribute.String("service.name", "checkout_servicename"),
 		attribute.String("deployment.environment", "dev"),
@@ -62,7 +80,13 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 		return nil, err
 	}
 
+
+
 	// --- Traces -------------------------------------------------------------
+
+	// Exporter: packs finished spans into OTLP and sends them over gRPC.
+	// WithInsecure = no TLS, fine for a Collector on the same machine.
+	// It connects lazily, so this works even if the Collector is not up yet.
 	traceExp, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithEndpoint(collectorEndpoint),
@@ -70,8 +94,12 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	if err != nil {
 		return nil, err
 	}
+	// Provider: creates a span on every tracer.Start(...).
+	// WithBatcher: when a span ends it goes into a queue, and the queue is
+	// sent every few seconds (or when it fills up). So span.End() never
+	// waits on the network.
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExp), // batches spans instead of sending one by one
+		sdktrace.WithBatcher(traceExp),
 		sdktrace.WithResource(res),
 	)
 	shutdowns = append(shutdowns, tp.Shutdown)
@@ -80,6 +108,8 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 
 
 	// --- Metrics ------------------------------------------------------------
+
+	// Exporter: same job as above, for metric data.
 	metricExp, err := otlpmetricgrpc.New(ctx,
 		otlpmetricgrpc.WithInsecure(),
 		otlpmetricgrpc.WithEndpoint(collectorEndpoint),
@@ -87,9 +117,12 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	if err != nil {
 		return nil, err
 	}
+	// Provider: creates counters/histograms and keeps their running totals
+	// in memory. counter.Add(1) only bumps a number; nothing is sent.
 	mp := sdkmetric.NewMeterProvider(
-		// Metrics are aggregated in-process and pushed on a timer, not per
-		// event. 5s keeps the demo snappy; the default is 60s.
+		// Metrics use a reader instead of a batcher: every 5s it reads the
+		// current totals and sends ONE snapshot, no matter how many requests
+		// happened. 5s keeps the demo quick; the default is 60s.
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp,
 			sdkmetric.WithInterval(5*time.Second))),
 		sdkmetric.WithResource(res),
@@ -97,7 +130,8 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	shutdowns = append(shutdowns, mp.Shutdown)
 	otel.SetMeterProvider(mp)
 
-	// Go runtime metrics: memory, GC, goroutines.
+	// Free Go metrics: memory, GC, goroutines. Must run after
+	// SetMeterProvider, because it registers on the global provider.
 	if err := runtime.Start(); err != nil {
 		return nil, err
 	}
@@ -105,6 +139,8 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 
 
 	// --- Logs ---------------------------------------------------------------
+
+	// Exporter: same job again, for log records.
 	logExp, err := otlploggrpc.New(ctx,
 		otlploggrpc.WithInsecure(),
 		otlploggrpc.WithEndpoint(collectorEndpoint),
@@ -112,6 +148,9 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	if err != nil {
 		return nil, err
 	}
+	// Provider: works like traces: records go into a queue that is sent in
+	// batches. Our code never calls it directly; slog feeds it through the
+	// otelslog bridge in logger.go.
 	lp := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
 		sdklog.WithResource(res),
@@ -119,9 +158,9 @@ func initTelemetry(ctx context.Context) (shutdown func(context.Context) error, e
 	shutdowns = append(shutdowns, lp.Shutdown)
 	otel.SetLoggerProvider(lp) // picked up by the otelslog bridge in logger.go
 
-
-
-	// W3C traceparent header: this is how the trace ID travels between hops.
+	// Propagator: how the trace ID travels between services or through a
+	// queue. Inject writes it into headers (the W3C "traceparent" header);
+	// Extract reads it back on the other side. See queue.go and worker.go.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
